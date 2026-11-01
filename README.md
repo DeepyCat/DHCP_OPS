@@ -1,8 +1,12 @@
-Jak nastavit DHCP pro SRV1-DS a PC1-WIN
+# Jak nastavit DHCP pro SRV1-DS a PC1-WIN
 
 # Návod na nastavení DHCP serveru pomocí PowerShellu
 
 Tento dokument obsahuje přehledné příkazy pro nastavení DHCP serveru na Windows Serveru (SRV1) a následné ověření z klientské stanice (PC1).
+
+> **⚠️ DŮLEŽITÉ UPOZORNĚNÍ:** 
+> * **IP adresy** v příkazech (např. `192.168.X.10`, `192.168.X.0` atd.) si **nutně upravte podle čísla počítače / sítě**, na které právě sedíte!
+> * Místo textu `<prijmeni>` v posledním kroku doplňte **svoje vlastní příjmení** malými písmeny.
 
 ### Krok 1: Instalace role DHCP
 
@@ -29,14 +33,14 @@ Set-ItemProperty -Path 'registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\ServerMa
 $DnsName = "$env:COMPUTERNAME.$((Get-ADDomain).DNSRoot)"
 $DnsName
 
-Add-DhcpServerInDC -DnsName $DnsName -IPAddress "192.168.12.10"
+Add-DhcpServerInDC -DnsName $DnsName -IPAddress "192.168.X.10"
 ```
 
 ### Krok 4: Vytvoření nového DHCP rozsahu (Scope)
 
 **\[SRV1\]**
 ```powershell
-Add-DhcpServerv4Scope -Name "Ucebna" -StartRange "192.168.12.100" -EndRange "192.168.12.200" -SubnetMask "255.255.255.0" -State Active
+Add-DhcpServerv4Scope -Name "Ucebna" -StartRange "192.168.X.100" -EndRange "192.168.X.200" -SubnetMask "255.255.255.0" -State Active
 ```
 
 ### Krok 5: Nastavení parametrů rozsahu (Router, DNS)
@@ -46,7 +50,7 @@ Add-DhcpServerv4Scope -Name "Ucebna" -StartRange "192.168.12.100" -EndRange "192
 $DomainName = (Get-ADDomain).DNSRoot
 $DomainName
 
-Set-DhcpServerv4OptionValue -ScopeId "192.168.12.0" -Router "192.168.12.1" -DnsServer "192.168.12.10" -DnsDomain $DomainName
+Set-DhcpServerv4OptionValue -ScopeId "192.168.X.0" -Router "192.168.X.1" -DnsServer "192.168.X.10" -DnsDomain $DomainName
 ```
 
 ### Krok 6: Nastavení DHCP klienta na klientské stanici
@@ -64,7 +68,7 @@ ipconfig /renew Ethernet1
 
 **\[SRV1\]**
 ```powershell
-Get-DhcpServerv4Lease -ScopeId "192.168.12.0" | Select-Object IPAddress, HostName, ClientId, AddressState, LeaseExpiryTime
+Get-DhcpServerv4Lease -ScopeId "192.168.X.0" | Select-Object IPAddress, HostName, ClientId, AddressState, LeaseExpiryTime
 ```
 
 ### Krok 8: Ověření funkčnosti z klienta
@@ -74,7 +78,7 @@ Get-DhcpServerv4Lease -ScopeId "192.168.12.0" | Select-Object IPAddress, HostNam
 ipconfig /release Ethernet1
 ipconfig /renew Ethernet1
 
-Test-NetConnection -ComputerName "192.168.12.10" -InformationLevel Detailed
+Test-NetConnection -ComputerName "192.168.X.10" -InformationLevel Detailed
 
 Resolve-DnsName -Name "srv1-dc.<prijmeni>.cyberschool.internal"
 ```
