@@ -1,78 +1,165 @@
-# Návod na nastavení DHCP serveru pomocí PowerShellu
+# Modul 03: DNS Server – postup
 
-Tento dokument obsahuje přehledné příkazy pro nastavení DHCP serveru na Windows Serveru (SRV1) a následné ověření z klientské stanice (PC1).
+Doména: `<prijmeni>.cyberschool.internal` (příjmení bez diakritiky)
+Číslo pracoviště: **N** (ve skriptech se zjistí automaticky z IP adresy na `Ethernet1`)
 
-### Krok 1: Instalace role DHCP
+| Stroj   | Role                   | IP               | DNS            |
+|---------|------------------------|------------------|----------------|
+| SRV1-DC | AD DS, DNS, DHCP       | `192.168.N.10`   | `192.168.N.10` |
+| SRV2-FS | File Server (budoucí)  | `192.168.N.20`   | `192.168.N.10` |
+| PC1-WIN | Klient (Windows 11)    | DHCP / statická  | `192.168.N.10` |
 
-**\[SRV1\]**
+> Na rozhraní **Ethernet0 (NAT)** nikdy nesahej. Pracuje se jen s **Ethernet1** (interní síť).
+> Všechny příkazy spouštěj v PowerShellu **jako správce**.
+
+---
+
+## Část A – SRV1-DC
+
+### A1. Kontrola role DNS a dopředné zóny
+
 ```powershell
-Install-WindowsFeature -Name DHCP -IncludeManagementTools
+Get-Service -Name DNS | Select-Object Name, Status, StartType
+Get-DnsServerZone -Name "$((Get-ADDomain).DNSRoot)" | Select-Object ZoneName, ZoneType, ReplicationScope, DynamicUpdate
+Get-DnsServerResourceRecord -ZoneName "$((Get-ADDomain).DNSRoot)" -RRType A -Name "srv1-dc"
 ```
 
-### Krok 2: Konfigurace bezpečnostních skupin a restart služby
+Očekávání: DNS `Running / Automatic`, zóna `Primary`, `Domain`, `Secure`.
 
-**\[SRV1\]**
+### A2. AD-integrovaná reverzní zóna pro 192.168.N.0/24
+
 ```powershell
-Add-DhcpServerSecurityGroup
-
-Restart-Service -Name DHCPServer
-
-Set-ItemProperty -Path 'registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\ServerManager\Roles\12' -Name 'ConfigurationState' -Value 2
+$wsX = (Get-NetIPAddress -InterfaceAlias Ethernet1 -AddressFamily IPv4).IPAddress.Split('.')[2]
+Add-DnsServerPrimaryZone -NetworkId "192.168.$wsX.0/24" -ReplicationScope "Domain" -DynamicUpdate "Secure"
 ```
 
-### Krok 3: Autorizace DHCP serveru v Active Directory
+### A3. Statický záznam A + PTR pro SRV2-FS
 
-**\[SRV1\]**
 ```powershell
-$DnsName = "$env:COMPUTERNAME.$((Get-ADDomain).DNSRoot)"
-$DnsName
-
-Add-DhcpServerInDC -DnsName $DnsName -IPAddress "192.168.12.10"
+$domain = (Get-ADDomain).DNSRoot
+$wsX = (Get-NetIPAddress -InterfaceAlias Ethernet1 -AddressFamily IPv4).IPAddress.Split('.')[2]
+Add-DnsServerResourceRecordA -Name "srv2-fs" -ZoneName $domain -IPv4Address "192.168.$wsX.20" -CreatePtr
 ```
 
-### Krok 4: Vytvoření nového DHCP rozsahu (Scope)
+### A4. Alias CNAME `ftp` → `srv2-fs`
 
-**\[SRV1\]**
 ```powershell
-Add-DhcpServerv4Scope -Name "Ucebna" -StartRange "192.168.12.100" -EndRange "192.168.12.200" -SubnetMask "255.255.255.0" -State Active
+$domain = (Get-ADDomain).DNSRoot
+Add-DnsServerResourceRecordCName -Name "ftp" -HostNameAlias "srv2-fs.$domain" -ZoneName $domain
 ```
 
-### Krok 5: Nastavení parametrů rozsahu (Router, DNS)
+### A5. Doplnění chybějícího PTR pro SRV1-DC (.10)
 
-**\[SRV1\]**
+Řadič vznikl dřív než reverzní zóna, proto PTR chybí.
+
 ```powershell
-$DomainName = (Get-ADDomain).DNSRoot
-$DomainName
-
-Set-DhcpServerv4OptionValue -ScopeId "192.168.12.0" -Router "192.168.12.1" -DnsServer "192.168.12.10" -DnsDomain $DomainName
+$domain = (Get-ADDomain).DNSRoot
+$wsX = (Get-NetIPAddress -InterfaceAlias Ethernet1 -AddressFamily IPv4).IPAddress.Split('.')[2]
+Add-DnsServerResourceRecordPtr -Name "10" -ZoneName "$wsX.168.192.in-addr.arpa" -PtrDomainName "srv1-dc.$domain"
 ```
 
-### Krok 6: Nastavení DHCP klienta na klientské stanici
+### A6. Kontrola na serveru
 
-**\[PC1\]**
 ```powershell
-Set-NetIPInterface -InterfaceAlias "Ethernet1" -Dhcp Enabled
-Set-DnsClientServerAddress -InterfaceAlias "Ethernet1" -ResetServerAddresses
+$domain = (Get-ADDomain).DNSRoot
+$wsX = (Get-NetIPAddress -InterfaceAlias Ethernet1 -AddressFamily IPv4).IPAddress.Split('.')[2]
 
-ipconfig /release Ethernet1
-ipconfig /renew Ethernet1
+# reverzní zóna
+Get-DnsServerZone -Name "$wsX.168.192.in-addr.arpa" | Select-Object ZoneName, ZoneType, ReplicationScope, DynamicUpdate
+
+# A záznamy
+Get-DnsServerResourceRecord -ZoneName $domain -RRType A | Where-Object { $_.HostName -in 'srv1-dc','srv2-fs' } | Select-Object HostName, RecordType, @{N='IPAddress';E={$_.RecordData.IPv4Address}}
+
+# PTR záznamy
+Get-DnsServerResourceRecord -ZoneName "$wsX.168.192.in-addr.arpa" -RRType Ptr | Where-Object { $_.HostName -in '10','20' } | Select-Object HostName, RecordType, @{N='PtrDomainName';E={$_.RecordData.PtrDomainName}}
+
+# CNAME
+Get-DnsServerResourceRecord -ZoneName $domain -Name "ftp" | Select-Object HostName, RecordType, @{N='HostNameAlias';E={$_.RecordData.HostNameAlias}}
 ```
 
-### Krok 7: Zjištění aktivních pronájmů (Leases)
+Grafická kontrola: `dnsmgmt.msc` → Forward Lookup Zones (A: srv1-dc, srv2-fs, PC1-WIN, CNAME ftp) a Reverse Lookup Zones (PTR 10 a 20).
 
-**\[SRV1\]**
+---
+
+## Část B – PC1-WIN
+
+### B1. Priorita adaptérů (Ethernet1 = 10, Ethernet0 = 50) a kontrola DNS
+
 ```powershell
-Get-DhcpServerv4Lease -ScopeId "192.168.12.0" | Select-Object IPAddress, HostName, ClientId, AddressState, LeaseExpiryTime
+Set-NetIPInterface -InterfaceAlias "Ethernet1" -InterfaceMetric 10
+Set-NetIPInterface -InterfaceAlias "Ethernet0" -InterfaceMetric 50
+Get-NetIPInterface -InterfaceAlias "Ethernet1","Ethernet0" -AddressFamily IPv4 | Select-Object InterfaceAlias, InterfaceMetric
+Get-DnsClientServerAddress -InterfaceAlias Ethernet1 -AddressFamily IPv4 | Select-Object InterfaceAlias, ServerAddresses
+Get-DnsClient -InterfaceAlias Ethernet1 | Select-Object ConnectionSpecificSuffix, RegisterThisConnectionsAddress
 ```
 
-### Krok 8: Ověření funkčnosti z klienta
+Očekávání: DNS = `192.168.N.10`, `RegisterThisConnectionsAddress = True`.
 
-**\[PC1\]**
+### B2. Dynamická registrace klienta v DNS
+
 ```powershell
-ipconfig /release Ethernet1
-ipconfig /renew Ethernet1
-
-Test-NetConnection -ComputerName "192.168.12.10" -InformationLevel Detailed
-
-Resolve-DnsName -Name "srv1-dc.<prijmeni>.cyberschool.internal"
+ipconfig /registerdns
+ipconfig /flushdns
 ```
+
+### B3. Test překladu (nahraď N číslem pracoviště)
+
+```powershell
+# dopředný překlad
+nslookup srv2-fs
+Resolve-DnsName -Name "srv2-fs" | Select-Object Name, Type, IPAddress
+
+# reverzní překlad
+nslookup 192.168.N.20
+nslookup 192.168.N.10
+
+# alias CNAME
+nslookup ftp
+Resolve-DnsName -Name "ftp.<prijmeni>.cyberschool.internal" -Server 192.168.N.10 | Select-Object Name, Type, NameHost, IPAddress
+
+# odezva přes jméno
+ping srv2-fs
+```
+
+Očekávání: žádné `Non-existent domain`; `ftp` → CNAME `srv2-fs...` → `192.168.N.20`. Ping na srv2-fs projde jen tehdy, když SRV2-FS už existuje a má povolený ICMP.
+
+---
+
+## Otisk konfigurace pro odevzdání
+
+**SRV1-DC:**
+
+```powershell
+Get-Date
+whoami
+hostname
+(Get-CimInstance Win32_ComputerSystemProduct).UUID
+(Get-ADDomain).DNSRoot
+(Get-ADDomain).DomainSID.Value
+```
+
+**PC1-WIN:**
+
+```powershell
+Get-Date
+whoami
+hostname
+(Get-CimInstance Win32_ComputerSystemProduct).UUID
+(Get-NetIPAddress -AddressFamily IPv4 | Where-Object IPAddress -like '192.168.*').IPAddress
+```
+
+## Nepovinné automatické ověření
+
+**SRV1-DC:**
+
+```
+powershell -ExecutionPolicy Bypass -Command "curl.exe --progress-bar -L https://raw.githubusercontent.com/DeepyCat/well_ops/main/skripty/03_check_SRV1-DC.bat -o check.bat; .\check.bat; Remove-Item -Force check.bat -ErrorAction SilentlyContinue"
+```
+
+**PC1-WIN:**
+
+```
+powershell -ExecutionPolicy Bypass -Command "curl.exe --progress-bar -L https://raw.githubusercontent.com/DeepyCat/well_ops/main/skripty/03_check_PC1-WIN.bat -o check.bat; .\check.bat; Remove-Item -Force check.bat -ErrorAction SilentlyContinue"
+```
+
+
